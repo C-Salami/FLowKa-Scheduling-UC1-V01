@@ -473,6 +473,9 @@ else:
 
 # ============================ INTELLIGENCE INPUT (single keyed instance) =========================
 user_cmd = st.chat_input("Type a command (delay/move/swap)…", key="cmd_input")
+# ============================ INTELLIGENCE INPUT (single keyed instance) =========================
+user_cmd = st.chat_input("Type a command (delay/move/swap)…", key="cmd_input")
+
 if user_cmd:
     try:
         payload = extract_intent(user_cmd)
@@ -483,7 +486,41 @@ if user_cmd:
         if "_target_dt" in log_payload:
             log_payload["_target_dt"] = str(log_payload["_target_dt"])
         st.session_state.cmd_log.append({
-            "raw": user_cmd, "payload": log_payload,
-            "ok": bool(ok), "msg": msg, "source": payload.get("_source","?")
+            "raw": user_cmd,
+            "payload": log_payload,
+            "ok": bool(ok),
+            "msg": msg,
+            "source": payload.get("_source", "?")
         })
-        st
+
+        if ok:
+            if payload["intent"] == "delay_order":
+                st.session_state.schedule_df = apply_delay(
+                    st.session_state.schedule_df,
+                    payload["order_id"],
+                    days=payload.get("days", 0),
+                    hours=payload.get("hours", 0),
+                    minutes=payload.get("minutes", 0),
+                )
+                st.success(f"✅ Delayed {payload['order_id']} successfully.")
+
+            elif payload["intent"] == "move_order":
+                st.session_state.schedule_df = apply_move(
+                    st.session_state.schedule_df,
+                    payload["order_id"],
+                    payload["_target_dt"],
+                )
+                st.success(f"✅ Moved {payload['order_id']} successfully.")
+
+            elif payload["intent"] == "swap_orders":
+                st.session_state.schedule_df = apply_swap(
+                    st.session_state.schedule_df,
+                    payload["order_id"],
+                    payload["order_id_2"],
+                )
+                st.success(f"✅ Swapped {payload['order_id']} and {payload['order_id_2']} successfully.")
+        else:
+            st.error(f"❌ Cannot apply: {msg}")
+
+    except Exception as e:
+        st.error(f"⚠️ Error: {e}")
