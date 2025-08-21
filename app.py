@@ -25,7 +25,7 @@ st.markdown(f"""
 }}
 
 /* Style the floating toggle button */
-div.stButton > button[kind="secondary"] {{
+div.stButton > button {{
   position: fixed; top: 10px; left: 10px;
   width: 28px; height: 28px; padding: 0; font-weight: 700;
   background: #000; color: #fff; border: none; border-radius: 4px; z-index: 2000;
@@ -95,7 +95,6 @@ sched = sched[sched["order_id"].isin(keep_ids)].copy()
 
 if sched.empty:
     st.info("No operations match the current filters.")
-    # Still render prompt bar at bottom
     st.markdown("""
     <div class="footer">
       <form class="inner" method="post">
@@ -121,7 +120,7 @@ range_ = [color_map[k] for k in domain]
 # Selection shared by all layers (click to focus an order, dbl-click to clear)
 select_order = alt.selection_point(fields=["order_id"], on="click", clear="dblclick")
 
-# Build layers separately, then layer with shared encodings/params at the top
+# Shared encodings (applied at the layered chart level)
 base_enc = {
     "y": alt.Y("machine:N", sort=sorted(sched["machine"].unique()), title=None),
     "x": alt.X("start:T", title=None, axis=alt.Axis(format="%a %b %d")),
@@ -158,9 +157,8 @@ gantt = (
     alt.layer(bars, labels, data=sched)
     .encode(**base_enc)
     .add_params(select_order)
-    .properties(width="container", height=520)
+    .properties(width="container", height=520, padding={"left": 0, "right": 0, "top": 0, "bottom": 0})
     .configure_view(stroke=None)
-    .configure_padding(left=0, right=0, top=0, bottom=0)
 )
 
 st.altair_chart(gantt, use_container_width=True)
