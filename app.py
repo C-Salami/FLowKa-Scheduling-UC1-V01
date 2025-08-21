@@ -65,27 +65,7 @@ st.markdown(f"""
 .topbar .btn:hover {{ opacity: 0.9; }}
 
 /* Tighten spacing */
-.block-container {{ padding-top: 6px; padding-bottom: 0; }}
-
-/* Fixed bottom prompt (visual only) */
-.footer {{
-  position: fixed; left: 0; right: 0; bottom: 0;
-  background: #fff; border-top: 1px solid #e5e7eb;
-  padding: 10px 14px; height: 64px; z-index: 1000;
-}}
-.footer .inner {{
-  max-width: 1100px; margin: 0 auto; display: flex; gap: 8px;
-  align-items: center; height: 44px;
-}}
-.footer input[type='text'] {{
-  flex: 1; height: 44px; border: 1px solid #d1d5db; border-radius: 9999px;
-  padding: 0 14px; font-size: 16px;
-}}
-.footer button {{
-  height: 44px; padding: 0 18px; border-radius: 9999px; background: #000; color: #fff;
-  border: none; font-weight: 600; cursor: pointer;
-}}
-.footer button:hover {{ opacity: 0.9; }}
+.block-container {{ padding-top: 6px; padding-bottom: 64px; }} /* keep room for chat input */
 
 /* Hide Streamlit default footer/menu */
 #MainMenu, footer {{ visibility: hidden; }}
@@ -154,7 +134,7 @@ wheel_choice = st.session_state.filt_wheels or sorted(base_schedule["wheel_type"
 machine_choice = st.session_state.filt_machines or sorted(base_schedule["machine"].unique().tolist())
 
 # ============================ NLP / INTELLIGENCE (INLINE) =========================
-INTENT_SCHEMA = {
+INTENT_SCHEMA = {  # kept for reference; used if you enable OpenAI path
   "type": "object",
   "properties": {
     "intent": {"type": "string", "enum": ["delay_order", "move_order", "swap_orders"]},
@@ -162,6 +142,7 @@ INTENT_SCHEMA = {
     "order_id_2": {"type": "string", "pattern": "^O\\d{3}$"},
     "days": {"type": "number"},
     "hours": {"type": "number"},
+    "minutes": {"type": "number"},
     "date": {"type": "string"},
     "time": {"type": "string"},
     "timezone": {"type": "string", "default": "Asia/Makassar"},
@@ -174,23 +155,44 @@ INTENT_SCHEMA = {
 DEFAULT_TZ = "Asia/Makassar"
 TZ = pytz.timezone(DEFAULT_TZ)
 
-# --- number words -> int (simple MVP up to 20) ---
+# --- number words -> float (simple MVP up to 20; supports decimals too) ---
 NUM_WORDS = {
     "zero":0,"one":1,"two":2,"three":3,"four":4,"five":5,
     "six":6,"seven":7,"eight":8,"nine":9,"ten":10,
     "eleven":11,"twelve":12,"thirteen":13,"fourteen":14,"fifteen":15,
     "sixteen":16,"seventeen":17,"eighteen":18,"nineteen":19,"twenty":20
 }
-def _num_token_to_int(tok: str):
+def _num_token_to_float(tok: str):
     t = tok.strip().lower().replace("-", " ")
-    if t.isdigit():
-        return int(t)
+    t = t.replace(",", ".")  # 1,5 -> 1.5
+    try:
+        return float(t)
+    except Exception:
+        pass
     parts = [p for p in t.split() if p]
     if len(parts) == 1 and parts[0] in NUM_WORDS:
-        return NUM_WORDS[parts[0]]
+        return float(NUM_WORDS[parts[0]])
     if len(parts) == 2 and parts[0] in NUM_WORDS and parts[1] in NUM_WORDS:
-        return NUM_WORDS[parts[0]] + NUM_WORDS[parts[1]]
+        return float(NUM_WORDS[parts[0]] + NUM_WORDS[parts[1]])
     return None
+
+def _parse_duration_chunks(text: str):
+    """
+    Parses '1h 30m', '90 minutes', '1.5 hours', '2 days', '45m', '75 min'
+    Returns dict like {'days':2,'hours':1,'minutes':30}
+    """
+    d = {"days":0.0,"hours":0.0,"minutes":0.0}
+    # find chunks like "1.5 hours", "90 minutes", "45m", "2d"
+    for num, unit in re.findall(r"([\d\.,]+|\b\w+\b)\s*(days?|d|hours?|h|minutes?|mins?|m)\b", text, flags=re.I):
+        n = _num_token_to_float(num)
+        if n is None: 
+            continue
+        u = unit.lower()
+        if u.startswith("d"): d["days"] += n
+        elif u.startswith("h"): d["hours"] += n
+        else: d["minutes"] += n
+    # also support single bare number + unit (already covered above)
+    return d
 
 def _extract_with_openai(user_text: str):
     from openai import OpenAI
@@ -202,15 +204,15 @@ def _extract_with_openai(user_text: str):
         "Order IDs look like O021 (3 digits). "
         "If user says 'tomorrow' etc., convert to ISO date in Asia/Makassar. "
         "If time missing on move_order, default 08:00. "
-        "If units missing on delay_order, assume days."
+        "If delay units missing, assume days. You may return minutes too."
     )
     USER_GUIDE = (
         'Examples:\n'
         '1) "delay O021 one day" -> {"intent":"delay_order","order_id":"O021","days":1}\n'
-        '2) "push order O009 by 24h" -> {"intent":"delay_order","order_id":"O009","hours":24}\n'
-        '3) "move o014 to Aug 30 9am" -> {"intent":"move_order","order_id":"O014","date":"2025-08-30","time":"09:00"}\n'
+        '2) "push order O009 by 1h 30m" -> {"intent":"delay_order","order_id":"O009","hours":1.0,"minutes":30.0}\n'
+        '3) "move o014 to Aug 30 09:13" -> {"intent":"move_order","order_id":"O014","date":"2025-08-30","time":"09:13"}\n'
         '4) "swap o027 with o031" -> {"intent":"swap_orders","order_id":"O027","order_id_2":"O031"}\n'
-        '5) "move O008 on monday morning" -> {"intent":"move_order","order_id":"O008","date":"<monday ISO>","time":"09:00"}\n'
+        '5) "advance O008 by two days" -> {"intent":"delay_order","order_id":"O008","days":-2}\n'
     )
     resp = client.responses.create(
         model="gpt-5.1",
@@ -233,41 +235,61 @@ def _regex_fallback(user_text: str):
     t = user_text.strip()
     low = t.lower()
 
-    # --- SWAP: allow "swap O023 O053" or "swap O023 with O053" or "swap O023 & O053"
+    # --- SWAP: "swap O023 O053" | "swap O023 with O053" | "swap O023 & O053"
     m = re.search(r"(?:^|\b)(swap|switch)\s+(o\d{3})\s*(?:with|and|&)?\s*(o\d{3})\b", low)
     if m:
         return {"intent": "swap_orders", "order_id": m.group(2).upper(), "order_id_2": m.group(3).upper(), "_source": "regex"}
 
-    # --- DELAY: allow digits or words, with or without 'by'
-    m = re.search(r"(delay|push|postpone)\s+(o\d{3}).*?\bby\b\s+([\w\-]+)\s*(day|days|d|hour|hours|h)\b", low)
-    if m:
-        n = _num_token_to_int(m.group(3))
-        if n is not None:
-            unit = m.group(4)
-            out = {"intent": "delay_order", "order_id": m.group(2).upper(), "_source": "regex"}
-            if unit.startswith("d"): out["days"] = n
-            else: out["hours"] = n
-            return out
+    # --- DELAY synonyms: delay/push/postpone (positive), advance/bring forward/pull in (negative)
+    delay_sign = +1
+    if re.search(r"\b(advance|bring\s+forward|pull\s+in)\b", low):
+        delay_sign = -1
+        low_norm = re.sub(r"\b(advance|bring\s+forward|pull\s+in)\b", "delay", low)
+    else:
+        low_norm = low
 
-    m = re.search(r"(delay|push|postpone)\s+(o\d{3}).*?\b([\w\-]+)\s*(day|days|d|hour|hours|h)\b", low)
+    # Try patterns with explicit "by <duration>"
+    m = re.search(r"(delay|push|postpone)\s+(o\d{3}).*?\bby\b\s+(.+)$", low_norm)
     if m:
-        n = _num_token_to_int(m.group(3))
-        if n is not None:
-            unit = m.group(4)
-            out = {"intent": "delay_order", "order_id": m.group(2).upper(), "_source": "regex"}
-            if unit.startswith("d"): out["days"] = n
-            else: out["hours"] = n
-            return out
+        oid = m.group(2).upper()
+        dur_text = m.group(3)
+        dur = _parse_duration_chunks(dur_text)
+        if any(v != 0 for v in dur.values()):
+            return {
+                "intent": "delay_order",
+                "order_id": oid,
+                "days": delay_sign * dur["days"],
+                "hours": delay_sign * dur["hours"],
+                "minutes": delay_sign * dur["minutes"],
+                "_source": "regex",
+            }
+
+    # Try patterns without "by", e.g. "delay O076 two days"
+    m = re.search(r"(delay|push|postpone)\s+(o\d{3}).*?(days?|d|hours?|h|minutes?|mins?|m)\b", low_norm)
+    if m:
+        # Extract any duration chunks from the whole text
+        oid = m.group(2).upper()
+        dur = _parse_duration_chunks(low_norm)
+        if any(v != 0 for v in dur.values()):
+            return {
+                "intent": "delay_order",
+                "order_id": oid,
+                "days": delay_sign * dur["days"],
+                "hours": delay_sign * dur["hours"],
+                "minutes": delay_sign * dur["minutes"],
+                "_source": "regex",
+            }
 
     # --- MOVE: "move Oxxx to/on <datetime>"
     m = re.search(r"(move|set|schedule)\s+(o\d{3})\s+(to|on)\s+(.+)", low)
     if m:
+        oid = m.group(2).upper()
         when = m.group(4)
         try:
             dt = dtp.parse(when, fuzzy=True)
             return {
                 "intent": "move_order",
-                "order_id": m.group(2).upper(),
+                "order_id": oid,
                 "date": dt.date().isoformat(),
                 "time": dt.strftime("%H:%M"),
                 "_source": "regex",
@@ -275,10 +297,10 @@ def _regex_fallback(user_text: str):
         except Exception:
             pass
 
-    # basic fallback for "one day"
-    m = re.search(r"(delay|push|postpone)\s+(o\d{3}).*\b(one)\s+day\b", low)
+    # Simple fallback: "one day"
+    m = re.search(r"(delay|push|postpone)\s+(o\d{3}).*\b(one)\s+day\b", low_norm)
     if m:
-        return {"intent": "delay_order", "order_id": m.group(2).upper(), "days": 1, "_source": "regex"}
+        return {"intent": "delay_order", "order_id": m.group(2).upper(), "days": delay_sign * 1, "_source": "regex"}
 
     return {"intent": "unknown", "raw": user_text, "_source": "regex"}
 
@@ -310,17 +332,18 @@ def validate_intent(payload: dict, orders_df, sched_df):
             return False, f"Unknown order_id_2: {oid2}"
         if oid2 == payload.get("order_id"):
             return False, "Cannot swap the same order."
+        return True, "ok"
 
     if intent == "delay_order":
-        if not payload.get("days") and not payload.get("hours"):
-            return False, "Delay needs days or hours."
-        try:
-            if "days" in payload and payload["days"] is not None:
-                payload["days"] = float(payload["days"])
-            if "hours" in payload and payload["hours"] is not None:
-                payload["hours"] = float(payload["hours"])
-        except Exception:
-            return False, "Days/Hours must be numeric."
+        # normalize numbers and allow minutes
+        for k in ("days","hours","minutes"):
+            if k in payload and payload[k] is not None:
+                try:
+                    payload[k] = float(payload[k])
+                except Exception:
+                    return False, f"{k.capitalize()} must be numeric."
+        if not any(payload.get(k) for k in ("days","hours","minutes")):
+            return False, "Delay needs a duration (days/hours/minutes)."
         return True, "ok"
 
     if intent == "move_order":
@@ -356,9 +379,9 @@ def _repack_touched_machines(s: pd.DataFrame, touched_orders):
             last_end = s.at[idx, "end"]
     return s
 
-def apply_delay(schedule_df: pd.DataFrame, order_id: str, days=0, hours=0):
+def apply_delay(schedule_df: pd.DataFrame, order_id: str, days=0, hours=0, minutes=0):
     s = schedule_df.copy()
-    delta = timedelta(days=float(days or 0), hours=float(hours or 0))
+    delta = timedelta(days=float(days or 0), hours=float(hours or 0), minutes=float(minutes or 0))
     mask = s["order_id"] == order_id
     s.loc[mask, "start"] = s.loc[mask, "start"] + delta
     s.loc[mask, "end"]   = s.loc[mask, "end"]   + delta
@@ -368,15 +391,19 @@ def apply_move(schedule_df: pd.DataFrame, order_id: str, target_dt):
     s = schedule_df.copy()
     t0 = s.loc[s["order_id"] == order_id, "start"].min()
     delta = target_dt - t0
-    return apply_delay(s, order_id, days=delta.days, hours=delta.seconds // 3600)
+    # incorporate full delta including minutes/seconds
+    days = delta.days
+    hours = delta.seconds // 3600
+    minutes = (delta.seconds % 3600) // 60
+    return apply_delay(s, order_id, days=days, hours=hours, minutes=minutes)
 
 def apply_swap(schedule_df: pd.DataFrame, a: str, b: str):
     s = schedule_df.copy()
     a0 = s.loc[s["order_id"] == a, "start"].min()
     b0 = s.loc[s["order_id"] == b, "start"].min()
     da, db = (b0 - a0), (a0 - b0)
-    s = apply_delay(s, a, days=da.days, hours=da.seconds // 3600)
-    s = apply_delay(s, b, days=db.days, hours=db.seconds // 3600)
+    s = apply_delay(s, a, days=da.days, hours=da.seconds // 3600, minutes=(da.seconds % 3600)//60)
+    s = apply_delay(s, b, days=db.days, hours=db.seconds // 3600, minutes=(db.seconds % 3600)//60)
     return s
 
 # ============================ FILTER & CHART =========================
@@ -459,45 +486,4 @@ if user_cmd:
             "raw": user_cmd, "payload": log_payload,
             "ok": bool(ok), "msg": msg, "source": payload.get("_source","?")
         })
-        st.session_state.cmd_log = st.session_state.cmd_log[-50:]
-
-        if not ok:
-            st.toast(f"Cannot apply: {msg}", icon="⚠️")
-        else:
-            if payload["intent"] == "delay_order":
-                st.session_state.schedule_df = apply_delay(
-                    st.session_state.schedule_df,
-                    payload["order_id"],
-                    days=payload.get("days") or 0,
-                    hours=payload.get("hours") or 0,
-                )
-                st.toast(f"Delayed {payload['order_id']}", icon="✅")
-
-            elif payload["intent"] == "move_order":
-                st.session_state.schedule_df = apply_move(
-                    st.session_state.schedule_df,
-                    payload["order_id"],
-                    payload["_target_dt"],
-                )
-                st.toast(f"Moved {payload['order_id']} to {payload['_target_dt']}", icon="✅")
-
-            elif payload["intent"] == "swap_orders":
-                st.session_state.schedule_df = apply_swap(
-                    st.session_state.schedule_df,
-                    payload["order_id"], payload["order_id_2"]
-                )
-                st.toast(f"Swapped {payload['order_id']} ↔ {payload['order_id_2']}", icon="✅")
-
-            st.rerun()
-    except Exception as e:
-        st.toast(f"Parser error: {e}", icon="❌")
-
-# ============================ VISUAL FOOTER (optional) =========================
-st.markdown("""
-<div class="footer">
-  <form class="inner" method="post">
-    <input name="cmd" type="text" placeholder="e.g., delay O021 one day • move O009 2025-08-30 09:00 • swap O014 O027" />
-    <button type="submit">Apply</button>
-  </form>
-</div>
-""", unsafe_allow_html=True)
+        st
