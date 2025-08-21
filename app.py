@@ -141,6 +141,47 @@ if st.session_state.filters_open:
             else:
                 st.caption("No commands yet.")
 
+user_cmd = st.chat_input("Type a command (delay/move/swap)…")
+if user_cmd:
+    try:
+        payload = extract_intent(user_cmd)
+        ok, msg = validate_intent(payload, orders, st.session_state.schedule_df)
+        log_payload = dict(payload)
+        if "_target_dt" in log_payload:
+            log_payload["_target_dt"] = str(log_payload["_target_dt"])
+        st.session_state.cmd_log.append({
+            "raw": user_cmd, "payload": log_payload, "ok": bool(ok),
+            "msg": msg, "source": payload.get("_source","?")
+        })
+        st.session_state.cmd_log = st.session_state.cmd_log[-50:]
+
+        if not ok:
+            st.toast(f"Cannot apply: {msg}", icon="⚠️")
+        else:
+            if payload["intent"] == "delay_order":
+                st.session_state.schedule_df = apply_delay(
+                    st.session_state.schedule_df,
+                    payload["order_id"],
+                    days=payload.get("days") or 0,
+                    hours=payload.get("hours") or 0,
+                )
+            elif payload["intent"] == "move_order":
+                st.session_state.schedule_df = apply_move(
+                    st.session_state.schedule_df,
+                    payload["order_id"], payload["_target_dt"]
+                )
+            elif payload["intent"] == "swap_orders":
+                st.session_state.schedule_df = apply_swap(
+                    st.session_state.schedule_df,
+                    payload["order_id"], payload["order_id_2"]
+                )
+            st.toast("Applied.", icon="✅")
+            st.rerun()
+    except Exception as e:
+        st.toast(f"Parser error: {e}", icon="❌")
+
+
+
 # Effective filter values (work even when sidebar hidden)
 max_orders = int(st.session_state.filt_max_orders)
 wheel_choice = st.session_state.filt_wheels or sorted(base_schedule["wheel_type"].unique().tolist())
