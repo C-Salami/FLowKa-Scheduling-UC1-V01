@@ -47,7 +47,10 @@ if "cmd_log" not in st.session_state:
 sidebar_display = "block" if st.session_state.filters_open else "none"
 st.markdown(f"""
 <style>
+/* Sidebar fully removed when hidden so chart uses full width */
 [data-testid="stSidebar"] {{ display: {sidebar_display}; }}
+
+/* Top bar */
 .topbar {{
   position: sticky; top: 0; z-index: 100;
   background: #fff; border-bottom: 1px solid #eee;
@@ -61,8 +64,10 @@ st.markdown(f"""
 }}
 .topbar .btn:hover {{ opacity: 0.9; }}
 
+/* Tighten spacing */
 .block-container {{ padding-top: 6px; padding-bottom: 0; }}
 
+/* Fixed bottom prompt (visual only) */
 .footer {{
   position: fixed; left: 0; right: 0; bottom: 0;
   background: #fff; border-top: 1px solid #e5e7eb;
@@ -81,6 +86,8 @@ st.markdown(f"""
   border: none; font-weight: 600; cursor: pointer;
 }}
 .footer button:hover {{ opacity: 0.9; }}
+
+/* Hide Streamlit default footer/menu */
 #MainMenu, footer {{ visibility: hidden; }}
 </style>
 """, unsafe_allow_html=True)
@@ -99,17 +106,17 @@ if st.session_state.filters_open:
     with st.sidebar:
         st.header("Filters ⚙️")
         st.session_state.filt_max_orders = st.number_input(
-            "Orders", 1, 100, value=st.session_state.filt_max_orders, step=1
+            "Orders", 1, 100, value=st.session_state.filt_max_orders, step=1, key="num_orders"
         )
         wheels_all = sorted(base_schedule["wheel_type"].unique().tolist())
         st.session_state.filt_wheels = st.multiselect(
-            "Wheel", wheels_all, default=st.session_state.filt_wheels or wheels_all
+            "Wheel", wheels_all, default=st.session_state.filt_wheels or wheels_all, key="wheel_ms"
         )
         machines_all = sorted(base_schedule["machine"].unique().tolist())
         st.session_state.filt_machines = st.multiselect(
-            "Machine", machines_all, default=st.session_state.filt_machines or machines_all
+            "Machine", machines_all, default=st.session_state.filt_machines or machines_all, key="machine_ms"
         )
-        if st.button("Reset filters"):
+        if st.button("Reset filters", key="reset_filters"):
             st.session_state.filt_max_orders = 12
             st.session_state.filt_wheels = wheels_all
             st.session_state.filt_machines = machines_all
@@ -140,47 +147,6 @@ if st.session_state.filters_open:
                 st.dataframe(pd.DataFrame(mini), use_container_width=True, hide_index=True)
             else:
                 st.caption("No commands yet.")
-
-user_cmd = st.chat_input("Type a command (delay/move/swap)…")
-if user_cmd:
-    try:
-        payload = extract_intent(user_cmd)
-        ok, msg = validate_intent(payload, orders, st.session_state.schedule_df)
-        log_payload = dict(payload)
-        if "_target_dt" in log_payload:
-            log_payload["_target_dt"] = str(log_payload["_target_dt"])
-        st.session_state.cmd_log.append({
-            "raw": user_cmd, "payload": log_payload, "ok": bool(ok),
-            "msg": msg, "source": payload.get("_source","?")
-        })
-        st.session_state.cmd_log = st.session_state.cmd_log[-50:]
-
-        if not ok:
-            st.toast(f"Cannot apply: {msg}", icon="⚠️")
-        else:
-            if payload["intent"] == "delay_order":
-                st.session_state.schedule_df = apply_delay(
-                    st.session_state.schedule_df,
-                    payload["order_id"],
-                    days=payload.get("days") or 0,
-                    hours=payload.get("hours") or 0,
-                )
-            elif payload["intent"] == "move_order":
-                st.session_state.schedule_df = apply_move(
-                    st.session_state.schedule_df,
-                    payload["order_id"], payload["_target_dt"]
-                )
-            elif payload["intent"] == "swap_orders":
-                st.session_state.schedule_df = apply_swap(
-                    st.session_state.schedule_df,
-                    payload["order_id"], payload["order_id_2"]
-                )
-            st.toast("Applied.", icon="✅")
-            st.rerun()
-    except Exception as e:
-        st.toast(f"Parser error: {e}", icon="❌")
-
-
 
 # Effective filter values (work even when sidebar hidden)
 max_orders = int(st.session_state.filt_max_orders)
@@ -270,7 +236,7 @@ def _regex_fallback(user_text: str):
     # --- SWAP: allow "swap O023 O053" or "swap O023 with O053" or "swap O023 & O053"
     m = re.search(r"(?:^|\b)(swap|switch)\s+(o\d{3})\s*(?:with|and|&)?\s*(o\d{3})\b", low)
     if m:
-        return {"intent": "swap_orders", "order_id": m.group(2).upper(), "order_id_2": m.group(3).upper(), "_source":"regex"}
+        return {"intent": "swap_orders", "order_id": m.group(2).upper(), "order_id_2": m.group(3).upper(), "_source": "regex"}
 
     # --- DELAY: allow digits or words, with or without 'by'
     m = re.search(r"(delay|push|postpone)\s+(o\d{3}).*?\bby\b\s+([\w\-]+)\s*(day|days|d|hour|hours|h)\b", low)
@@ -278,7 +244,7 @@ def _regex_fallback(user_text: str):
         n = _num_token_to_int(m.group(3))
         if n is not None:
             unit = m.group(4)
-            out = {"intent": "delay_order", "order_id": m.group(2).upper(), "_source":"regex"}
+            out = {"intent": "delay_order", "order_id": m.group(2).upper(), "_source": "regex"}
             if unit.startswith("d"): out["days"] = n
             else: out["hours"] = n
             return out
@@ -288,7 +254,7 @@ def _regex_fallback(user_text: str):
         n = _num_token_to_int(m.group(3))
         if n is not None:
             unit = m.group(4)
-            out = {"intent": "delay_order", "order_id": m.group(2).upper(), "_source":"regex"}
+            out = {"intent": "delay_order", "order_id": m.group(2).upper(), "_source": "regex"}
             if unit.startswith("d"): out["days"] = n
             else: out["hours"] = n
             return out
@@ -312,9 +278,9 @@ def _regex_fallback(user_text: str):
     # basic fallback for "one day"
     m = re.search(r"(delay|push|postpone)\s+(o\d{3}).*\b(one)\s+day\b", low)
     if m:
-        return {"intent": "delay_order", "order_id": m.group(2).upper(), "days": 1, "_source":"regex"}
+        return {"intent": "delay_order", "order_id": m.group(2).upper(), "days": 1, "_source": "regex"}
 
-    return {"intent": "unknown", "raw": user_text, "_source":"regex"}
+    return {"intent": "unknown", "raw": user_text, "_source": "regex"}
 
 def extract_intent(user_text: str) -> dict:
     try:
@@ -478,8 +444,8 @@ else:
     )
     st.altair_chart(gantt, use_container_width=True)
 
-# ============================ INTELLIGENCE INPUT =========================
-user_cmd = st.chat_input("Type a command (delay/move/swap)…")
+# ============================ INTELLIGENCE INPUT (single keyed instance) =========================
+user_cmd = st.chat_input("Type a command (delay/move/swap)…", key="cmd_input")
 if user_cmd:
     try:
         payload = extract_intent(user_cmd)
