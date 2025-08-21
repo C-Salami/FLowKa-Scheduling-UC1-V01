@@ -10,14 +10,13 @@ if "filters_open" not in st.session_state:
     st.session_state["filters_open"] = True  # open at first load
 
 # ---------------- CSS ----------------
+sidebar_display = "block" if st.session_state["filters_open"] else "none"
+
 st.markdown(f"""
 <style>
-/* Slide the sidebar in/out smoothly */
+/* Fully hide sidebar when closed */
 [data-testid="stSidebar"] {{
-  width: {'18rem' if st.session_state['filters_open'] else '0'} !important;
-  min-width: {'18rem' if st.session_state['filters_open'] else '0'} !important;
-  overflow: hidden;
-  transition: width 0.2s ease-in-out;
+  display: {sidebar_display};
 }}
 
 /* Top toolbar */
@@ -65,6 +64,28 @@ st.markdown(f"""
 #MainMenu, footer {{ visibility: hidden; }}
 </style>
 """, unsafe_allow_html=True)
+
+# ---------------- Top toolbar ----------------
+toggle_label = "Hide Filters" if st.session_state["filters_open"] else "Show Filters"
+if st.button(toggle_label):
+    st.session_state["filters_open"] = not st.session_state["filters_open"]
+
+# ---------------- Sidebar filters (only render if open) ----------------
+if st.session_state["filters_open"]:
+    with st.sidebar:
+        st.header("Filters ⚙️")
+        max_orders = st.number_input("Orders", min_value=1, max_value=100, value=10, step=1)
+
+        wheels = sorted(schedule["wheel_type"].unique())
+        wheel_choice = st.multiselect("Wheel", wheels, default=wheels)
+
+        machines = sorted(schedule["machine"].unique())
+        machine_choice = st.multiselect("Machine", machines, default=machines)
+else:
+    # Defaults when sidebar hidden
+    max_orders = 10
+    wheel_choice = sorted(schedule["wheel_type"].unique())
+    machine_choice = sorted(schedule["machine"].unique())
 
 # ---------------- Top toolbar with explicit toggle ----------------
 colA, colB = st.columns([1, 1])
