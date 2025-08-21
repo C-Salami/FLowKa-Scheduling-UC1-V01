@@ -64,8 +64,8 @@ st.markdown(f"""
 }}
 .topbar .btn:hover {{ opacity: 0.9; }}
 
-/* Tighten spacing */
-.block-container {{ padding-top: 6px; padding-bottom: 64px; }} /* keep room for chat input */
+/* Tighten spacing and leave room for chat input at bottom */
+.block-container {{ padding-top: 6px; padding-bottom: 64px; }}
 
 /* Hide Streamlit default footer/menu */
 #MainMenu, footer {{ visibility: hidden; }}
@@ -182,16 +182,14 @@ def _parse_duration_chunks(text: str):
     Returns dict like {'days':2,'hours':1,'minutes':30}
     """
     d = {"days":0.0,"hours":0.0,"minutes":0.0}
-    # find chunks like "1.5 hours", "90 minutes", "45m", "2d"
     for num, unit in re.findall(r"([\d\.,]+|\b\w+\b)\s*(days?|d|hours?|h|minutes?|mins?|m)\b", text, flags=re.I):
         n = _num_token_to_float(num)
-        if n is None: 
+        if n is None:
             continue
         u = unit.lower()
         if u.startswith("d"): d["days"] += n
         elif u.startswith("h"): d["hours"] += n
         else: d["minutes"] += n
-    # also support single bare number + unit (already covered above)
     return d
 
 def _extract_with_openai(user_text: str):
@@ -267,7 +265,6 @@ def _regex_fallback(user_text: str):
     # Try patterns without "by", e.g. "delay O076 two days"
     m = re.search(r"(delay|push|postpone)\s+(o\d{3}).*?(days?|d|hours?|h|minutes?|mins?|m)\b", low_norm)
     if m:
-        # Extract any duration chunks from the whole text
         oid = m.group(2).upper()
         dur = _parse_duration_chunks(low_norm)
         if any(v != 0 for v in dur.values()):
@@ -391,7 +388,6 @@ def apply_move(schedule_df: pd.DataFrame, order_id: str, target_dt):
     s = schedule_df.copy()
     t0 = s.loc[s["order_id"] == order_id, "start"].min()
     delta = target_dt - t0
-    # incorporate full delta including minutes/seconds
     days = delta.days
     hours = delta.seconds // 3600
     minutes = (delta.seconds % 3600) // 60
@@ -473,8 +469,6 @@ else:
 
 # ============================ INTELLIGENCE INPUT (single keyed instance) =========================
 user_cmd = st.chat_input("Type a command (delay/move/swap)…", key="cmd_input")
-# ============================ INTELLIGENCE INPUT (single keyed instance) =========================
-user_cmd = st.chat_input("Type a command (delay/move/swap)…", key="cmd_input")
 
 if user_cmd:
     try:
@@ -492,8 +486,11 @@ if user_cmd:
             "msg": msg,
             "source": payload.get("_source", "?")
         })
+        st.session_state.cmd_log = st.session_state.cmd_log[-50:]
 
-        if ok:
+        if not ok:
+            st.error(f"❌ Cannot apply: {msg}")
+        else:
             if payload["intent"] == "delay_order":
                 st.session_state.schedule_df = apply_delay(
                     st.session_state.schedule_df,
@@ -502,7 +499,7 @@ if user_cmd:
                     hours=payload.get("hours", 0),
                     minutes=payload.get("minutes", 0),
                 )
-                st.success(f"✅ Delayed {payload['order_id']} successfully.")
+                st.success(f"✅ Delayed {payload['order_id']}.")
 
             elif payload["intent"] == "move_order":
                 st.session_state.schedule_df = apply_move(
@@ -510,7 +507,7 @@ if user_cmd:
                     payload["order_id"],
                     payload["_target_dt"],
                 )
-                st.success(f"✅ Moved {payload['order_id']} successfully.")
+                st.success(f"✅ Moved {payload['order_id']}.")
 
             elif payload["intent"] == "swap_orders":
                 st.session_state.schedule_df = apply_swap(
@@ -518,9 +515,9 @@ if user_cmd:
                     payload["order_id"],
                     payload["order_id_2"],
                 )
-                st.success(f"✅ Swapped {payload['order_id']} and {payload['order_id_2']} successfully.")
-        else:
-            st.error(f"❌ Cannot apply: {msg}")
+                st.success(f"✅ Swapped {payload['order_id']} and {payload['order_id_2']}.")
+
+            st.rerun()
 
     except Exception as e:
         st.error(f"⚠️ Error: {e}")
