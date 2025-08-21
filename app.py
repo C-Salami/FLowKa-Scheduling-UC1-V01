@@ -1,15 +1,24 @@
+import os
+import json
+import re
+from datetime import timedelta
+import pytz
+from dateutil import parser as dtp
+
 import streamlit as st
 import pandas as pd
 import altair as alt
 
-from nlp_extractor import extract_intent
-from nlp_validate import validate_intent
-from nlp_apply import apply_delay, apply_move, apply_swap
-
-# ---------------- Page setup ----------------
+# ============================ PAGE & SECRETS ============================
 st.set_page_config(page_title="Scooter Wheels Scheduler", layout="wide")
 
-# ---------------- Data ----------------
+# Pull OPENAI key from Streamlit secrets if available (TOML: OPENAI_API_KEY = "sk-...")
+try:
+    os.environ["OPENAI_API_KEY"] = os.environ.get("OPENAI_API_KEY") or st.secrets["OPENAI_API_KEY"]
+except Exception:
+    pass  # fine; we'll fall back to regex if no key
+
+# ============================ DATA LOADING =============================
 @st.cache_data
 def load_data():
     orders = pd.read_csv("data/scooter_orders.csv", parse_dates=["due_date"])
@@ -22,11 +31,9 @@ orders, base_schedule = load_data()
 if "schedule_df" not in st.session_state:
     st.session_state.schedule_df = base_schedule.copy()
 
-# ---------------- State: sidebar open by default ----------------
+# ============================ FILTER STATE =============================
 if "filters_open" not in st.session_state:
     st.session_state.filters_open = True
-
-# Initialize/persist filters
 if "filt_max_orders" not in st.session_state:
     st.session_state.filt_max_orders = 12
 if "filt_wheels" not in st.session_state:
@@ -34,7 +41,7 @@ if "filt_wheels" not in st.session_state:
 if "filt_machines" not in st.session_state:
     st.session_state.filt_machines = sorted(base_schedule["machine"].unique().tolist())
 
-# ---------------- CSS ----------------
+# ============================ CSS / LAYOUT =============================
 sidebar_display = "block" if st.session_state.filters_open else "none"
 st.markdown(f"""
 <style>
@@ -76,7 +83,7 @@ st.markdown(f"""
 </style>
 """, unsafe_allow_html=True)
 
-# ---------------- Top toolbar ----------------
+# ============================ TOP BAR =============================
 st.markdown('<div class="topbar"><div class="inner">', unsafe_allow_html=True)
 st.markdown('<div class="title">Scooter Wheels Scheduler</div>', unsafe_allow_html=True)
 toggle_label = "Hide Filters" if st.session_state.filters_open else "Show Filters"
@@ -85,20 +92,20 @@ if st.button(toggle_label, key="toggle_filters_btn"):
     st.rerun()
 st.markdown('</div></div>', unsafe_allow_html=True)
 
-# ---------------- Sidebar (render only when open) ----------------
+# ============================ SIDEBAR FILTERS =========================
 if st.session_state.filters_open:
     with st.sidebar:
         st.header("Filters ⚙️")
         st.session_state.filt_max_orders = st.number_input(
-            "Orders", 1, 100, value=st.session_state.filt_max_orders, step=1, key="max_orders_input"
+            "Orders", 1, 100, value=st.session_state.filt_max_orders, step=1
         )
         wheels_all = sorted(base_schedule["wheel_type"].unique().tolist())
         st.session_state.filt_wheels = st.multiselect(
-            "Wheel", wheels_all, default=st.session_state.filt_wheels or wheels_all, key="wheels_multiselect"
+            "Wheel", wheels_all, default=st.session_state.filt_wheels or wheels_all
         )
         machines_all = sorted(base_schedule["machine"].unique().tolist())
         st.session_state.filt_machines = st.multiselect(
-            "Machine", machines_all, default=st.session_state.filt_machines or machines_all, key="machines_multiselect"
+            "Machine", machines_all, default=st.session_state.filt_machines or machines_all
         )
         if st.button("Reset filters"):
             st.session_state.filt_max_orders = 12
@@ -106,12 +113,203 @@ if st.session_state.filters_open:
             st.session_state.filt_machines = machines_all
             st.rerun()
 
-# ---------------- Apply filters ----------------
+# Effective filter values (work even when sidebar hidden)
 max_orders = int(st.session_state.filt_max_orders)
 wheel_choice = st.session_state.filt_wheels or sorted(base_schedule["wheel_type"].unique().tolist())
 machine_choice = st.session_state.filt_machines or sorted(base_schedule["machine"].unique().tolist())
 
-# Filter the *working* schedule
+# ============================ NLP / INTELLIGENCE (INLINE) =========================
+# -- Schema (for reference) --
+INTENT_SCHEMA = {
+  "type": "object",
+  "properties": {
+    "intent": {"type": "string", "enum": ["delay_order", "move_order", "swap_orders"]},
+    "order_id": {"type": "string", "pattern": "^O\\d{3}$"},
+    "order_id_2": {"type": "string", "pattern": "^O\\d{3}$"},
+    "days": {"type": "number"},
+    "hours": {"type": "number"},
+    "date": {"type": "string"},
+    "time": {"type": "string"},
+    "timezone": {"type": "string", "default": "Asia/Makassar"},
+    "note": {"type": "string"}
+  },
+  "required": ["intent"],
+  "additionalProperties": False
+}
+
+DEFAULT_TZ = "Asia/Makassar"
+TZ = pytz.timezone(DEFAULT_TZ)
+
+def _extract_with_openai(user_text: str):
+    # Requires OPENAI_API_KEY; uses structured outputs
+    from openai import OpenAI
+    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    SYSTEM = (
+        "You normalize factory scheduling edit commands for a Gantt. "
+        "Return ONLY JSON matching the given schema. "
+        "Supported intents: delay_order, move_order, swap_orders. "
+        "Order IDs look like O021 (3 digits). "
+        "If user says 'tomorrow' etc., convert to ISO date in Asia/Makassar. "
+        "If time missing on move_order, default 08:00. "
+        "If units missing on delay_order, assume days."
+    )
+    USER_GUIDE = (
+        'Examples:\n'
+        '1) "delay O021 one day" -> {"intent":"delay_order","order_id":"O021","days":1}\n'
+        '2) "push order O009 by 24h" -> {"intent":"delay_order","order_id":"O009","hours":24}\n'
+        '3) "move o014 to Aug 30 9am" -> {"intent":"move_order","order_id":"O014","date":"2025-08-30","time":"09:00"}\n'
+        '4) "swap o027 with o031" -> {"intent":"swap_orders","order_id":"O027","order_id_2":"O031"}\n'
+        '5) "move O008 on monday morning" -> {"intent":"move_order","order_id":"O008","date":"<monday ISO>","time":"09:00"}\n'
+    )
+    resp = client.responses.create(
+        model="gpt-5.1",
+        input=[
+            {"role": "system", "content": SYSTEM},
+            {"role": "user", "content": USER_GUIDE},
+            {"role": "user", "content": user_text},
+        ],
+        response_format={
+            "type": "json_schema",
+            "json_schema": {"name": "Edit", "schema": INTENT_SCHEMA}
+        },
+    )
+    text = resp.output[0].content[0].text
+    return json.loads(text)
+
+def _regex_fallback(user_text: str):
+    t = user_text.strip()
+    low = t.lower()
+
+    m = re.search(r"(swap|switch)\s+(o\d{3})\s+(with|and)\s+(o\d{3})", low)
+    if m:
+        return {"intent": "swap_orders", "order_id": m.group(2).upper(), "order_id_2": m.group(4).upper()}
+
+    m = re.search(r"(delay|push|postpone)\s+(o\d{3})\s+(by\s+)?(\d+)\s*(day|days|d|hour|hours|h)", low)
+    if m:
+        unit = m.group(5); n = int(m.group(4))
+        out = {"intent": "delay_order", "order_id": m.group(2).upper()}
+        if unit.startswith("d"): out["days"] = n
+        else: out["hours"] = n
+        return out
+
+    m = re.search(r"(move|set|schedule)\s+(o\d{3})\s+(to|on)\s+(.+)", low)
+    if m:
+        when = m.group(4)
+        try:
+            dt = dtp.parse(when, fuzzy=True)
+            return {
+                "intent": "move_order",
+                "order_id": m.group(2).upper(),
+                "date": dt.date().isoformat(),
+                "time": dt.strftime("%H:%M"),
+            }
+        except Exception:
+            pass
+
+    m = re.search(r"(delay|push|postpone)\s+(o\d{3}).*(one|1)\s+day", low)
+    if m:
+        return {"intent": "delay_order", "order_id": m.group(2).upper(), "days": 1}
+
+    return {"intent": "unknown", "raw": user_text}
+
+def extract_intent(user_text: str) -> dict:
+    try:
+        if os.getenv("OPENAI_API_KEY"):
+            return _extract_with_openai(user_text)
+    except Exception:
+        pass
+    return _regex_fallback(user_text)
+
+def validate_intent(payload: dict, orders_df, sched_df):
+    intent = payload.get("intent")
+
+    def order_exists(oid):
+        return oid and (orders_df["order_id"] == oid).any()
+
+    if intent not in ("delay_order", "move_order", "swap_orders"):
+        return False, "Unsupported intent"
+
+    if intent in ("delay_order", "move_order", "swap_orders"):
+        oid = payload.get("order_id")
+        if not order_exists(oid):
+            return False, f"Unknown order_id: {oid}"
+
+    if intent == "swap_orders":
+        oid2 = payload.get("order_id_2")
+        if not order_exists(oid2):
+            return False, f"Unknown order_id_2: {oid2}"
+        if oid2 == payload.get("order_id"):
+            return False, "Cannot swap the same order."
+
+    if intent == "delay_order":
+        if not payload.get("days") and not payload.get("hours"):
+            return False, "Delay needs days or hours."
+        try:
+            if "days" in payload and payload["days"] is not None:
+                payload["days"] = float(payload["days"])
+            if "hours" in payload and payload["hours"] is not None:
+                payload["hours"] = float(payload["hours"])
+        except Exception:
+            return False, "Days/Hours must be numeric."
+        return True, "ok"
+
+    if intent == "move_order":
+        date_str = payload.get("date")
+        hhmm = payload.get("time") or "08:00"
+        if not date_str:
+            return False, "Move needs a date."
+        try:
+            dt = dtp.parse(f"{date_str} {hhmm}")
+            if dt.tzinfo is None:
+                dt = TZ.localize(dt)
+            else:
+                dt = dt.astimezone(TZ)
+            payload["_target_dt"] = dt
+        except Exception:
+            return False, f"Unparseable datetime: {date_str} {hhmm}"
+        return True, "ok"
+
+    return False, "Invalid payload"
+
+# ============================ APPLY FUNCTIONS (INLINE) =========================
+def _repack_touched_machines(s: pd.DataFrame, touched_orders):
+    machines = s.loc[s["order_id"].isin(touched_orders), "machine"].unique().tolist()
+    for m in machines:
+        block_idx = s.index[s["machine"] == m]
+        block = s.loc[block_idx].sort_values(["start", "end"]).copy()
+        last_end = None
+        for idx, row in block.iterrows():
+            if last_end is not None and row["start"] < last_end:
+                dur = row["end"] - row["start"]
+                s.at[idx, "start"] = last_end
+                s.at[idx, "end"] = last_end + dur
+            last_end = s.at[idx, "end"]
+    return s
+
+def apply_delay(schedule_df: pd.DataFrame, order_id: str, days=0, hours=0):
+    s = schedule_df.copy()
+    delta = timedelta(days=float(days or 0), hours=float(hours or 0))
+    mask = s["order_id"] == order_id
+    s.loc[mask, "start"] = s.loc[mask, "start"] + delta
+    s.loc[mask, "end"]   = s.loc[mask, "end"]   + delta
+    return _repack_touched_machines(s, [order_id])
+
+def apply_move(schedule_df: pd.DataFrame, order_id: str, target_dt):
+    s = schedule_df.copy()
+    t0 = s.loc[s["order_id"] == order_id, "start"].min()
+    delta = target_dt - t0
+    return apply_delay(s, order_id, days=delta.days, hours=delta.seconds // 3600)
+
+def apply_swap(schedule_df: pd.DataFrame, a: str, b: str):
+    s = schedule_df.copy()
+    a0 = s.loc[s["order_id"] == a, "start"].min()
+    b0 = s.loc[s["order_id"] == b, "start"].min()
+    da, db = (b0 - a0), (a0 - b0)
+    s = apply_delay(s, a, days=da.days, hours=da.seconds // 3600)
+    s = apply_delay(s, b, days=db.days, hours=db.seconds // 3600)
+    return s
+
+# ============================ FILTER & CHART =========================
 sched = st.session_state.schedule_df.copy()
 sched = sched[sched["wheel_type"].isin(wheel_choice)]
 sched = sched[sched["machine"].isin(machine_choice)]
@@ -119,7 +317,6 @@ order_priority = sched.groupby("order_id", as_index=False)["start"].min().sort_v
 keep_ids = order_priority["order_id"].head(max_orders).tolist()
 sched = sched[sched["order_id"].isin(keep_ids)].copy()
 
-# ---------------- Gantt (Altair) ----------------
 if sched.empty:
     st.info("No operations match the current filters.")
 else:
@@ -175,10 +372,9 @@ else:
         .properties(width="container", height=520)
         .configure_view(stroke=None)
     )
-
     st.altair_chart(gantt, use_container_width=True)
 
-# ---------------- Intelligence input & apply ----------------
+# ============================ INTELLIGENCE INPUT =========================
 user_cmd = st.chat_input("Type a command (delay/move/swap)…")
 if user_cmd:
     try:
@@ -212,11 +408,11 @@ if user_cmd:
     except Exception as e:
         st.toast(f"Parser error: {e}", icon="❌")
 
-# ---------------- Fixed prompt bar (visual only) ----------------
+# ============================ VISUAL FOOTER (optional) =========================
 st.markdown("""
 <div class="footer">
   <form class="inner" method="post">
-    <input name="cmd" type="text" placeholder="Type a command (e.g., delay O021 one day / move O009 2025-08-30 09:00 / swap O014 O027)" />
+    <input name="cmd" type="text" placeholder="e.g., delay O021 one day • move O009 2025-08-30 09:00 • swap O014 O027" />
     <button type="submit">Apply</button>
   </form>
 </div>
