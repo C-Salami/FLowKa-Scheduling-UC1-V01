@@ -5,12 +5,12 @@ import altair as alt
 # ---------------- Page setup ----------------
 st.set_page_config(page_title="Scooter Wheels Scheduler", layout="wide")
 
-# ---------------- CSS (sidebar toggle + fixed prompt) ----------------
+# ---------------- CSS & sidebar toggle (OPEN by default) ----------------
 if "filters_open" not in st.session_state:
-    st.session_state["filters_open"] = False  # start hidden
+    st.session_state["filters_open"] = False  # open on first load
 
-# Floating toggle (top-left). Click to show/hide filters.
-toggle = st.button("▶", help="Show/Hide filters", key="toggle_filters")
+label = "◀" if st.session_state["filters_open"] else "▶"
+toggle = st.button(label, help="Show/Hide filters", key="toggle_filters")
 if toggle:
     st.session_state["filters_open"] = not st.session_state["filters_open"]
 
@@ -18,20 +18,22 @@ st.markdown(f"""
 <style>
 /* Collapse / expand the sidebar smoothly */
 [data-testid="stSidebar"] {{
-  width: {'0' if not st.session_state['filters_open'] else '18rem'} !important;
-  min-width: {'0' if not st.session_state['filters_open'] else '18rem'} !important;
+  width: {'18rem' if st.session_state['filters_open'] else '0'} !important;
+  min-width: {'18rem' if st.session_state['filters_open'] else '0'} !important;
   overflow: hidden;
   transition: width 0.2s ease-in-out;
 }}
 
-/* Style the floating toggle button */
+/* Floating toggle button (top-left) */
 div.stButton > button {{
   position: fixed; top: 10px; left: 10px;
-  width: 28px; height: 28px; padding: 0; font-weight: 700;
-  background: #000; color: #fff; border: none; border-radius: 4px; z-index: 2000;
+  width: 36px; height: 36px; padding: 0; font-weight: 700;
+  background: #000; color: #fff; border: none; border-radius: 6px; z-index: 2000;
+  box-shadow: 0 2px 6px rgba(0,0,0,0.2);
 }}
+div.stButton > button:hover {{ opacity: 0.9; }}
 
-/* Tighten default spacing a bit */
+/* Tighter spacing */
 .block-container {{ padding-top: 6px; padding-bottom: 0; }}
 
 /* Fixed bottom prompt bar */
@@ -157,7 +159,7 @@ gantt = (
     alt.layer(bars, labels, data=sched)
     .encode(**base_enc)
     .add_params(select_order)
-    .properties(width="container", height=520, padding={"left": 0, "right": 0, "top": 0, "bottom": 0})
+    .properties(width="container", height=520)
     .configure_view(stroke=None)
 )
 
