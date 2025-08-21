@@ -3,21 +3,17 @@ import pandas as pd
 import altair as alt
 from datetime import timedelta
 
-# ---------- PAGE ----------
 st.set_page_config(page_title="Scooter Wheels Scheduler", layout="wide")
 
-# ---------- COMPACT CSS (single-line filters, fixed footer, no vertical scroll) ----------
+# ---------- CSS ----------
 st.markdown("""
 <style>
 .stAppViewContainer { padding-top: 6px; }
 .block-container { padding-top: 4px; padding-bottom: 0; }
 html, body, [data-testid="stAppViewContainer"] { height: 100vh; overflow: hidden; }
-main { height: 100vh; }
 
-/* Layout regions */
+/* Filters: one line */
 #filters { height: 56px; display: flex; align-items: center; gap: 12px; }
-#chart-wrap { height: calc(100vh - 56px - 64px); } /* filters + footer */
-#chart { height: 100%; }
 
 /* Compact widgets */
 .small label { font-size: 12px !important; margin-bottom: 2px !important; }
@@ -43,7 +39,7 @@ main { height: 100vh; }
 }
 .footer button:hover { opacity: 0.9; }
 
-/* Hide Streamlit chrome */
+/* Hide Streamlit footer & menu */
 #MainMenu, footer {visibility: hidden;}
 </style>
 """, unsafe_allow_html=True)
@@ -57,29 +53,26 @@ def load_data():
 
 orders, schedule = load_data()
 
-# ---------- FILTER STRIP (one compact line) ----------
+# ---------- FILTER STRIP ----------
 st.markdown('<div id="filters">', unsafe_allow_html=True)
 col1, col2, col3 = st.columns([1, 1, 1])
 
 with col1:
-    with st.container():
-        st.markdown('<div class="small">', unsafe_allow_html=True)
-        max_orders = st.number_input("Orders", min_value=1, max_value=100, value=10, step=1, key="orders_n")
-        st.markdown('</div>', unsafe_allow_html=True)
+    st.markdown('<div class="small">', unsafe_allow_html=True)
+    max_orders = st.number_input("Orders", 1, 100, 10, step=1)
+    st.markdown('</div>', unsafe_allow_html=True)
 
 with col2:
-    with st.container():
-        st.markdown('<div class="small">', unsafe_allow_html=True)
-        w_all = sorted(schedule["wheel_type"].unique().tolist())
-        wheel_choice = st.selectbox("Wheel", ["All"] + w_all, index=0, key="wheel_one")
-        st.markdown('</div>', unsafe_allow_html=True)
+    st.markdown('<div class="small">', unsafe_allow_html=True)
+    wheels = sorted(schedule["wheel_type"].unique())
+    wheel_choice = st.selectbox("Wheel", ["All"] + wheels, index=0)
+    st.markdown('</div>', unsafe_allow_html=True)
 
 with col3:
-    with st.container():
-        st.markdown('<div class="small">', unsafe_allow_html=True)
-        m_all = sorted(schedule["machine"].unique().tolist())
-        machine_choice = st.selectbox("Machine", ["All"] + m_all, index=0, key="machine_one")
-        st.markdown('</div>', unsafe_allow_html=True)
+    st.markdown('<div class="small">', unsafe_allow_html=True)
+    machines = sorted(schedule["machine"].unique())
+    machine_choice = st.selectbox("Machine", ["All"] + machines, index=0)
+    st.markdown('</div>', unsafe_allow_html=True)
 
 st.markdown('</div>', unsafe_allow_html=True)
 
@@ -90,22 +83,13 @@ if wheel_choice != "All":
 if machine_choice != "All":
     sched = sched[sched["machine"] == machine_choice]
 
-# keep first N orders by earliest start
 order_first_start = sched.groupby("order_id")["start"].min().sort_values().reset_index()
-keep_order_ids = order_first_start["order_id"].head(int(max_orders)).tolist()
-sched = sched[sched["order_id"].isin(keep_order_ids)].copy()
+keep_ids = order_first_start["order_id"].head(int(max_orders)).tolist()
+sched = sched[sched["order_id"].isin(keep_ids)]
 if sched.empty:
     st.stop()
 
-# Precompute
-sched["uid"] = (
-    sched["order_id"].astype(str) + "|" +
-    sched["machine"].astype(str) + "|" +
-    sched["operation"].astype(str) + "|" +
-    sched["sequence"].astype(str)
-)
-
-# Colors
+# ---------- GANTT ----------
 color_map = {
     "Urban-200":"#1f77b4", "Offroad-250":"#ff7f0e", "Racing-180":"#2ca02c",
     "HeavyDuty-300":"#d62728", "Eco-160":"#9467bd"
@@ -113,57 +97,36 @@ color_map = {
 domain = list(color_map.keys())
 range_ = [color_map[k] for k in domain]
 
-# ---------- CHART (middle, fixed-height) ----------
-st.markdown('<div id="chart-wrap"><div id="chart">', unsafe_allow_html=True)
-
-# Selection: click to highlight the order; dbl-click to clear
 select_order = alt.selection_point(fields=["order_id"], on="click", clear="dblclick")
 
-base = alt.Chart(sched).properties(width="container", height=520)  # FIXED PIXEL HEIGHT
+base = alt.Chart(sched).properties(width="container", height=520)
 
-bars = (
-    base.mark_bar(cornerRadius=3)
-    .encode(
-        y=alt.Y("machine:N", sort=sorted(sched["machine"].unique()), title=None),
-        x=alt.X("start:T", title=None, axis=alt.Axis(format="%a %b %d")),
-        x2="end:T",
-        color=alt.condition(
-            select_order,
-            alt.Color("wheel_type:N", scale=alt.Scale(domain=domain, range=range_), legend=None),
-            alt.value("#dcdcdc")
-        ),
-        opacity=alt.condition(select_order, alt.value(1.0), alt.value(0.25)),
-        tooltip=[
-            alt.Tooltip("order_id:N", title="Order"),
-            alt.Tooltip("operation:N", title="Operation"),
-            alt.Tooltip("sequence:Q", title="Seq"),
-            alt.Tooltip("machine:N", title="Machine"),
-            alt.Tooltip("start:T", title="Start"),
-            alt.Tooltip("end:T", title="End"),
-            alt.Tooltip("due_date:T", title="Due"),
-            alt.Tooltip("wheel_type:N", title="Wheel"),
-        ]
-    )
-    .add_params(select_order)
-)
+bars = base.mark_bar(cornerRadius=3).encode(
+    y=alt.Y("machine:N", sort=sorted(sched["machine"].unique()), title=None),
+    x=alt.X("start:T", title=None, axis=alt.Axis(format="%a %b %d")),
+    x2="end:T",
+    color=alt.condition(
+        select_order,
+        alt.Color("wheel_type:N", scale=alt.Scale(domain=domain, range=range_), legend=None),
+        alt.value("#dcdcdc")
+    ),
+    opacity=alt.condition(select_order, alt.value(1.0), alt.value(0.25)),
+    tooltip=["order_id", "operation", "sequence", "machine", "start", "end", "due_date", "wheel_type"]
+).add_params(select_order)
 
-# Order IDs inside bars
-labels = (
-    base.mark_text(align="left", dx=6, baseline="middle", fontSize=10, color="white")
-    .encode(
-        y=alt.Y("machine:N", sort=sorted(sched["machine"].unique()), title=None),
-        x=alt.X("start:T"),
-        text="order_id:N",
-        opacity=alt.condition(select_order, alt.value(1.0), alt.value(0.7)),
-    )
+labels = base.mark_text(
+    align="left", dx=6, baseline="middle", fontSize=10, color="white"
+).encode(
+    y="machine:N",
+    x="start:T",
+    text="order_id:N",
+    opacity=alt.condition(select_order, alt.value(1.0), alt.value(0.7))
 )
 
 gantt = (bars + labels).configure_view(stroke=None)
 st.altair_chart(gantt, use_container_width=True)
 
-st.markdown('</div></div>', unsafe_allow_html=True)
-
-# ---------- FIXED PROMPT (bottom) ----------
+# ---------- FOOTER ----------
 st.markdown("""
 <div class="footer">
   <form class="inner" method="post">
