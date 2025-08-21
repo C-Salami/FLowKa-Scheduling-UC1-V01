@@ -5,18 +5,14 @@ import altair as alt
 # ---------------- Page setup ----------------
 st.set_page_config(page_title="Scooter Wheels Scheduler", layout="wide")
 
-# ---------------- CSS & sidebar toggle (OPEN by default) ----------------
+# ---------------- State: sidebar open by default ----------------
 if "filters_open" not in st.session_state:
-    st.session_state["filters_open"] = True  # open on first load
+    st.session_state["filters_open"] = True  # open at first load
 
-label = "◀" if st.session_state["filters_open"] else "▶"
-toggle = st.button(label, help="Show/Hide filters", key="toggle_filters")
-if toggle:
-    st.session_state["filters_open"] = not st.session_state["filters_open"]
-
+# ---------------- CSS ----------------
 st.markdown(f"""
 <style>
-/* Collapse / expand the sidebar smoothly */
+/* Slide the sidebar in/out smoothly */
 [data-testid="stSidebar"] {{
   width: {'18rem' if st.session_state['filters_open'] else '0'} !important;
   min-width: {'18rem' if st.session_state['filters_open'] else '0'} !important;
@@ -24,16 +20,25 @@ st.markdown(f"""
   transition: width 0.2s ease-in-out;
 }}
 
-/* Floating toggle button (top-left) */
-div.stButton > button {{
-  position: fixed; top: 10px; left: 10px;
-  width: 36px; height: 36px; padding: 0; font-weight: 700;
-  background: #000; color: #fff; border: none; border-radius: 6px; z-index: 2000;
-  box-shadow: 0 2px 6px rgba(0,0,0,0.2);
+/* Top toolbar */
+.topbar {{
+  position: sticky; top: 0; z-index: 100;
+  background: #fff; border-bottom: 1px solid #eee;
+  padding: 8px 8px 6px 8px; margin-bottom: 6px;
 }}
-div.stButton > button:hover {{ opacity: 0.9; }}
+.topbar .inner {{
+  display: flex; justify-content: space-between; align-items: center;
+}}
+.topbar .title {{
+  font-weight: 600; font-size: 16px;
+}}
+.topbar .btn {{
+  background: #000; color: #fff; border: none; border-radius: 8px;
+  padding: 6px 12px; font-weight: 600; cursor: pointer;
+}}
+.topbar .btn:hover {{ opacity: 0.9; }}
 
-/* Tighter spacing */
+/* Tighten spacing */
 .block-container {{ padding-top: 6px; padding-bottom: 0; }}
 
 /* Fixed bottom prompt bar */
@@ -60,6 +65,26 @@ div.stButton > button:hover {{ opacity: 0.9; }}
 #MainMenu, footer {{ visibility: hidden; }}
 </style>
 """, unsafe_allow_html=True)
+
+# ---------------- Top toolbar with explicit toggle ----------------
+colA, colB = st.columns([1, 1])
+with colA:
+    st.markdown('<div class="topbar"><div class="inner">', unsafe_allow_html=True)
+    st.markdown('<div class="title">Scooter Wheels Scheduler</div>', unsafe_allow_html=True)
+with colB:
+    # Draw a normal Streamlit button; we style via CSS class on the next line
+    toggle_label = "Hide Filters" if st.session_state["filters_open"] else "Show Filters"
+    # We wrap in markdown so we can apply the CSS class
+    st.markdown(f'<div style="text-align:right;"><button onclick="window.location.reload()" class="btn">{toggle_label}</button></div>', unsafe_allow_html=True)
+    st.markdown('</div></div>', unsafe_allow_html=True)
+
+# Implement the toggle with a Streamlit button right below (so it works server-side)
+# (We hide this button visually by giving it empty label, but it flips the state.)
+clicked = st.button("", key="toggle_filters_internal")
+if clicked:
+    st.session_state["filters_open"] = not st.session_state["filters_open"]
+
+# Tip: If you prefer, replace the two-button trick above with st.form_submit_button in a small form.
 
 # ---------------- Data ----------------
 @st.cache_data
@@ -88,7 +113,6 @@ if wheel_choice:
 if machine_choice:
     sched = sched[sched["machine"].isin(machine_choice)]
 
-# Keep first N orders by earliest start (within current filters)
 order_priority = (
     sched.groupby("order_id", as_index=False)["start"].min().sort_values("start")
 )
@@ -108,7 +132,6 @@ if sched.empty:
     st.stop()
 
 # ---------------- Gantt (Altair) ----------------
-# Color palette per wheel type
 color_map = {
     "Urban-200": "#1f77b4",
     "Offroad-250": "#ff7f0e",
@@ -119,10 +142,8 @@ color_map = {
 domain = list(color_map.keys())
 range_ = [color_map[k] for k in domain]
 
-# Selection shared by all layers (click to focus an order, dbl-click to clear)
 select_order = alt.selection_point(fields=["order_id"], on="click", clear="dblclick")
 
-# Shared encodings (applied at the layered chart level)
 base_enc = {
     "y": alt.Y("machine:N", sort=sorted(sched["machine"].unique()), title=None),
     "x": alt.X("start:T", title=None, axis=alt.Axis(format="%a %b %d")),
