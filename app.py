@@ -31,7 +31,7 @@ orders, base_schedule = load_data()
 if "schedule_df" not in st.session_state:
     st.session_state.schedule_df = base_schedule.copy()
 
-# ============================ FILTER STATE =============================
+# ============================ FILTER & LOG STATE =======================
 if "filters_open" not in st.session_state:
     st.session_state.filters_open = True
 if "filt_max_orders" not in st.session_state:
@@ -40,6 +40,8 @@ if "filt_wheels" not in st.session_state:
     st.session_state.filt_wheels = sorted(base_schedule["wheel_type"].unique().tolist())
 if "filt_machines" not in st.session_state:
     st.session_state.filt_machines = sorted(base_schedule["machine"].unique().tolist())
+if "cmd_log" not in st.session_state:
+    st.session_state.cmd_log = []  # rolling debug log
 
 # ============================ CSS / LAYOUT =============================
 sidebar_display = "block" if st.session_state.filters_open else "none"
@@ -113,13 +115,38 @@ if st.session_state.filters_open:
             st.session_state.filt_machines = machines_all
             st.rerun()
 
+        # ---- Debug panel in sidebar ----
+        with st.expander("🔎 Debug (last commands)"):
+            if st.session_state.cmd_log:
+                last = st.session_state.cmd_log[-1]
+                st.markdown("**Last payload:**")
+                st.json(last["payload"])
+                st.markdown(
+                    f"- **OK:** {last['ok']}   \n"
+                    f"- **Message:** {last['msg']}   \n"
+                    f"- **Source:** {last.get('source','?')}   \n"
+                    f"- **Raw:** `{last['raw']}`"
+                )
+                mini = [
+                    {
+                        "raw": e["raw"],
+                        "intent": e["payload"].get("intent", "?"),
+                        "ok": e["ok"],
+                        "msg": e["msg"],
+                        "source": e.get("source", "?"),
+                    }
+                    for e in st.session_state.cmd_log[-10:]
+                ]
+                st.dataframe(pd.DataFrame(mini), use_container_width=True, hide_index=True)
+            else:
+                st.caption("No commands yet.")
+
 # Effective filter values (work even when sidebar hidden)
 max_orders = int(st.session_state.filt_max_orders)
 wheel_choice = st.session_state.filt_wheels or sorted(base_schedule["wheel_type"].unique().tolist())
 machine_choice = st.session_state.filt_machines or sorted(base_schedule["machine"].unique().tolist())
 
 # ============================ NLP / INTELLIGENCE (INLINE) =========================
-# -- Schema (for reference) --
 INTENT_SCHEMA = {
   "type": "object",
   "properties": {
@@ -140,8 +167,25 @@ INTENT_SCHEMA = {
 DEFAULT_TZ = "Asia/Makassar"
 TZ = pytz.timezone(DEFAULT_TZ)
 
+# --- number words -> int (simple MVP up to 20) ---
+NUM_WORDS = {
+    "zero":0,"one":1,"two":2,"three":3,"four":4,"five":5,
+    "six":6,"seven":7,"eight":8,"nine":9,"ten":10,
+    "eleven":11,"twelve":12,"thirteen":13,"fourteen":14,"fifteen":15,
+    "sixteen":16,"seventeen":17,"eighteen":18,"nineteen":19,"twenty":20
+}
+def _num_token_to_int(tok: str):
+    t = tok.strip().lower().replace("-", " ")
+    if t.isdigit():
+        return int(t)
+    parts = [p for p in t.split() if p]
+    if len(parts) == 1 and parts[0] in NUM_WORDS:
+        return NUM_WORDS[parts[0]]
+    if len(parts) == 2 and parts[0] in NUM_WORDS and parts[1] in NUM_WORDS:
+        return NUM_WORDS[parts[0]] + NUM_WORDS[parts[1]]
+    return None
+
 def _extract_with_openai(user_text: str):
-    # Requires OPENAI_API_KEY; uses structured outputs
     from openai import OpenAI
     client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
     SYSTEM = (
@@ -174,24 +218,41 @@ def _extract_with_openai(user_text: str):
         },
     )
     text = resp.output[0].content[0].text
-    return json.loads(text)
+    data = json.loads(text)
+    data["_source"] = "openai"
+    return data
 
 def _regex_fallback(user_text: str):
     t = user_text.strip()
     low = t.lower()
 
-    m = re.search(r"(swap|switch)\s+(o\d{3})\s+(with|and)\s+(o\d{3})", low)
+    # --- SWAP: allow "swap O023 O053" or "swap O023 with O053" or "swap O023 & O053"
+    m = re.search(r"(?:^|\b)(swap|switch)\s+(o\d{3})\s*(?:with|and|&)?\s*(o\d{3})\b", low)
     if m:
-        return {"intent": "swap_orders", "order_id": m.group(2).upper(), "order_id_2": m.group(4).upper()}
+        return {"intent": "swap_orders", "order_id": m.group(2).upper(), "order_id_2": m.group(3).upper(), "_source":"regex"}
 
-    m = re.search(r"(delay|push|postpone)\s+(o\d{3})\s+(by\s+)?(\d+)\s*(day|days|d|hour|hours|h)", low)
+    # --- DELAY: allow digits or words, with or without 'by'
+    m = re.search(r"(delay|push|postpone)\s+(o\d{3}).*?\bby\b\s+([\w\-]+)\s*(day|days|d|hour|hours|h)\b", low)
     if m:
-        unit = m.group(5); n = int(m.group(4))
-        out = {"intent": "delay_order", "order_id": m.group(2).upper()}
-        if unit.startswith("d"): out["days"] = n
-        else: out["hours"] = n
-        return out
+        n = _num_token_to_int(m.group(3))
+        if n is not None:
+            unit = m.group(4)
+            out = {"intent": "delay_order", "order_id": m.group(2).upper(), "_source":"regex"}
+            if unit.startswith("d"): out["days"] = n
+            else: out["hours"] = n
+            return out
 
+    m = re.search(r"(delay|push|postpone)\s+(o\d{3}).*?\b([\w\-]+)\s*(day|days|d|hour|hours|h)\b", low)
+    if m:
+        n = _num_token_to_int(m.group(3))
+        if n is not None:
+            unit = m.group(4)
+            out = {"intent": "delay_order", "order_id": m.group(2).upper(), "_source":"regex"}
+            if unit.startswith("d"): out["days"] = n
+            else: out["hours"] = n
+            return out
+
+    # --- MOVE: "move Oxxx to/on <datetime>"
     m = re.search(r"(move|set|schedule)\s+(o\d{3})\s+(to|on)\s+(.+)", low)
     if m:
         when = m.group(4)
@@ -202,15 +263,17 @@ def _regex_fallback(user_text: str):
                 "order_id": m.group(2).upper(),
                 "date": dt.date().isoformat(),
                 "time": dt.strftime("%H:%M"),
+                "_source": "regex",
             }
         except Exception:
             pass
 
-    m = re.search(r"(delay|push|postpone)\s+(o\d{3}).*(one|1)\s+day", low)
+    # basic fallback for "one day"
+    m = re.search(r"(delay|push|postpone)\s+(o\d{3}).*\b(one)\s+day\b", low)
     if m:
-        return {"intent": "delay_order", "order_id": m.group(2).upper(), "days": 1}
+        return {"intent": "delay_order", "order_id": m.group(2).upper(), "days": 1, "_source":"regex"}
 
-    return {"intent": "unknown", "raw": user_text}
+    return {"intent": "unknown", "raw": user_text, "_source":"regex"}
 
 def extract_intent(user_text: str) -> dict:
     try:
@@ -271,7 +334,7 @@ def validate_intent(payload: dict, orders_df, sched_df):
 
     return False, "Invalid payload"
 
-# ============================ APPLY FUNCTIONS (INLINE) =========================
+# ============================ APPLY FUNCTIONS =========================
 def _repack_touched_machines(s: pd.DataFrame, touched_orders):
     machines = s.loc[s["order_id"].isin(touched_orders), "machine"].unique().tolist()
     for m in machines:
@@ -380,6 +443,17 @@ if user_cmd:
     try:
         payload = extract_intent(user_cmd)
         ok, msg = validate_intent(payload, orders, st.session_state.schedule_df)
+
+        # log it (json-safe)
+        log_payload = dict(payload)
+        if "_target_dt" in log_payload:
+            log_payload["_target_dt"] = str(log_payload["_target_dt"])
+        st.session_state.cmd_log.append({
+            "raw": user_cmd, "payload": log_payload,
+            "ok": bool(ok), "msg": msg, "source": payload.get("_source","?")
+        })
+        st.session_state.cmd_log = st.session_state.cmd_log[-50:]
+
         if not ok:
             st.toast(f"Cannot apply: {msg}", icon="⚠️")
         else:
@@ -391,6 +465,7 @@ if user_cmd:
                     hours=payload.get("hours") or 0,
                 )
                 st.toast(f"Delayed {payload['order_id']}", icon="✅")
+
             elif payload["intent"] == "move_order":
                 st.session_state.schedule_df = apply_move(
                     st.session_state.schedule_df,
@@ -398,12 +473,14 @@ if user_cmd:
                     payload["_target_dt"],
                 )
                 st.toast(f"Moved {payload['order_id']} to {payload['_target_dt']}", icon="✅")
+
             elif payload["intent"] == "swap_orders":
                 st.session_state.schedule_df = apply_swap(
                     st.session_state.schedule_df,
                     payload["order_id"], payload["order_id_2"]
                 )
                 st.toast(f"Swapped {payload['order_id']} ↔ {payload['order_id_2']}", icon="✅")
+
             st.rerun()
     except Exception as e:
         st.toast(f"Parser error: {e}", icon="❌")
