@@ -7,7 +7,7 @@ st.set_page_config(page_title="Scooter Wheels Scheduler", layout="wide")
 
 # ---------------- CSS & sidebar toggle (OPEN by default) ----------------
 if "filters_open" not in st.session_state:
-    st.session_state["filters_open"] = False  # open on first load
+    st.session_state["filters_open"] = True  # open on first load
 
 label = "◀" if st.session_state["filters_open"] else "▶"
 toggle = st.button(label, help="Show/Hide filters", key="toggle_filters")
